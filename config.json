@@ -1,0 +1,31 @@
+{
+  "admin_port": 9000,
+  "streams": [
+    {
+      "name": "Example FM",
+      "source_url": "http://stream.example.com/radio",
+      "port": 8080,
+      "proxy": {
+        "type": "socks5",
+        "address": "127.0.0.1:1080",
+        "username": "",
+        "password": ""
+      },
+      "reconnect_delay_secs": 3,
+      "max_reconnect_delay_secs": 60
+    },
+    {
+      "name": "Jazz Radio",
+      "source_url": "http://jazz.example.net/live",
+      "port": 8081,
+      "proxy": {
+        "type": "http",
+        "address": "proxy.example.com:3128",
+        "username": "proxyuser",
+        "password": "proxypass"
+      },
+      "reconnect_delay_secs": 5,
+      "max_reconnect_delay_secs": 120
+    }
+  ]
+}
