@@ -182,32 +182,42 @@ func (sm *StreamManager) Run(ctx context.Context) {
 		defer wg.Done()
 		sm.serveListeners(ctx)
 	}()
-	go sm.bpsTicker()
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		sm.bpsTicker(ctx)
+	}()
 	sm.relayLoop(ctx)
 	wg.Wait()
 }
 
-// bpsTicker refreshes InputBPS and OutputBPS every second.
-func (sm *StreamManager) bpsTicker() {
+// bpsTicker refreshes InputBPS and OutputBPS every second until ctx is cancelled.
+func (sm *StreamManager) bpsTicker(ctx context.Context) {
 	prevIn := sm.stats.TotalBytesIn.Load()
 	prevOut := sm.stats.TotalBytesOut.Load()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	for range ticker.C {
-		curIn := sm.stats.TotalBytesIn.Load()
-		curOut := sm.stats.TotalBytesOut.Load()
-		sm.stats.InputBPS.Store(curIn - prevIn)
-		sm.stats.OutputBPS.Store(curOut - prevOut)
-		prevIn = curIn
-		prevOut = curOut
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			curIn := sm.stats.TotalBytesIn.Load()
+			curOut := sm.stats.TotalBytesOut.Load()
+			sm.stats.InputBPS.Store(curIn - prevIn)
+			sm.stats.OutputBPS.Store(curOut - prevOut)
+			prevIn = curIn
+			prevOut = curOut
+		}
 	}
 }
 
 // relayLoop connects to the upstream, reads data, and broadcasts to listeners.
 // On any error it waits with exponential backoff then retries.
 func (sm *StreamManager) relayLoop(ctx context.Context) {
-	delay := time.Duration(sm.cfg.ReconnectDelaySecs) * time.Second
+	initDelay := time.Duration(sm.cfg.ReconnectDelaySecs) * time.Second
 	maxDelay := time.Duration(sm.cfg.MaxReconnectDelaySecs) * time.Second
+	delay := initDelay
 
 	for {
 		if ctx.Err() != nil {
@@ -219,6 +229,7 @@ func (sm *StreamManager) relayLoop(ctx context.Context) {
 		log.Printf("[%s] connecting to %s via %s %s",
 			sm.cfg.Name, sm.cfg.SourceURL, sm.cfg.Proxy.Type, sm.cfg.Proxy.Address)
 
+		start := time.Now()
 		err := sm.relay(ctx)
 
 		if ctx.Err() != nil {
@@ -226,13 +237,24 @@ func (sm *StreamManager) relayLoop(ctx context.Context) {
 			return
 		}
 
+		// If the session ran long enough to be considered stable, reset the
+		// backoff so the next reconnect is fast rather than waiting at the
+		// last accumulated delay.
+		if time.Since(start) >= initDelay {
+			delay = initDelay
+		}
+
 		sm.stats.setStatus("reconnecting")
 		sm.stats.ReconnectCount.Add(1)
 		log.Printf("[%s] relay error: %v — reconnecting in %s", sm.cfg.Name, err, delay)
 
+		// Use a timer instead of time.After so it can be stopped immediately
+		// when ctx is cancelled, rather than leaking until the delay expires.
+		t := time.NewTimer(delay)
 		select {
-		case <-time.After(delay):
+		case <-t.C:
 		case <-ctx.Done():
+			t.Stop()
 			sm.stats.setStatus("stopped")
 			return
 		}
@@ -361,14 +383,14 @@ func (sm *StreamManager) broadcast(chunk []byte) {
 // addListener registers a new listener. Returns (listener, true) on success,
 // or (nil, false) if the max listener cap has been reached.
 func (sm *StreamManager) addListener() (*listener, bool) {
-	l := &listener{
-		ch:   make(chan []byte, listenerBufChunks),
-		done: make(chan struct{}),
-	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.cfg.MaxListeners > 0 && len(sm.listeners) >= sm.cfg.MaxListeners {
 		return nil, false
+	}
+	l := &listener{
+		ch:   make(chan []byte, listenerBufChunks),
+		done: make(chan struct{}),
 	}
 	sm.listeners[l] = struct{}{}
 	sm.stats.ListenerCount.Add(1)
@@ -476,7 +498,7 @@ func (sm *StreamManager) handleListener(w http.ResponseWriter, r *http.Request) 
 	// Forward ICY station headers (icy-name, icy-description, icy-genre, …).
 	// icy-metaint is absent from upHdrs (stripped at relay level).
 	for k, vs := range upHdrs {
-		if strings.HasPrefix(strings.ToLower(k), "icy-") {
+		if strings.HasPrefix(strings.ToLower(k), "icy-") && len(vs) > 0 {
 			hdr.WriteString(k + ": " + vs[0] + "\r\n")
 		}
 	}
