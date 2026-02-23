@@ -21,6 +21,9 @@ func NewDialer(cfg ProxyConfig) (proxy.Dialer, error) {
 		return proxy.Direct, nil
 
 	case "socks4", "socks4a", "socks5":
+		if cfg.Address == "" {
+			return nil, fmt.Errorf("proxy: %s requires an address", cfg.Type)
+		}
 		var rawURL string
 		if cfg.Username != "" {
 			u := url.URL{
@@ -43,6 +46,9 @@ func NewDialer(cfg ProxyConfig) (proxy.Dialer, error) {
 		return d, nil
 
 	case "http", "https":
+		if cfg.Address == "" {
+			return nil, fmt.Errorf("proxy: %s requires an address", cfg.Type)
+		}
 		return &httpConnectDialer{cfg: cfg}, nil
 
 	default:
@@ -89,11 +95,14 @@ func DialContextFunc(d proxy.Dialer, timeout time.Duration) func(context.Context
 			return r.conn, r.err
 		case <-ctx.Done():
 			// Drain the goroutine and close the connection if it arrived late.
-			go func() {
-				if r := <-ch; r.conn != nil {
+			select {
+			case r := <-ch:
+				if r.conn != nil {
 					r.conn.Close()
 				}
-			}()
+			default:
+				// No connection received yet
+			}
 			return nil, ctx.Err()
 		}
 	}

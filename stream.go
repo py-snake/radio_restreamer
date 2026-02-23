@@ -48,6 +48,9 @@ func (s *icyStripper) write(w io.Writer, chunk []byte) error {
 			}
 
 		case s.needMetaLen:
+			if len(chunk) == 0 {
+				return nil
+			}
 			metaLen := int(chunk[0]) * 16
 			chunk = chunk[1:]
 			s.needMetaLen = false
@@ -59,13 +62,15 @@ func (s *icyStripper) write(w io.Writer, chunk []byte) error {
 
 		default:
 			n := min(s.audioLeft, len(chunk))
-			if _, err := w.Write(chunk[:n]); err != nil {
-				return err
-			}
-			chunk = chunk[n:]
-			s.audioLeft -= n
-			if s.audioLeft == 0 {
-				s.needMetaLen = true
+			if n > 0 {
+				if _, err := w.Write(chunk[:n]); err != nil {
+					return err
+				}
+				chunk = chunk[n:]
+				s.audioLeft -= n
+				if s.audioLeft == 0 {
+					s.needMetaLen = true
+				}
 			}
 		}
 	}
@@ -128,7 +133,8 @@ type StreamManager struct {
 
 	// ctx is the root context; cancelled on shutdown.
 	// Set once in Run() before any goroutines that use it are started.
-	ctx context.Context
+	ctxMu sync.RWMutex
+	ctx   context.Context
 
 	mu        sync.Mutex
 	listeners map[*listener]struct{}
@@ -174,7 +180,9 @@ func (sm *StreamManager) Snapshot() StreamSnapshot {
 // It blocks until ctx is cancelled and all servers have shut down.
 func (sm *StreamManager) Run(ctx context.Context) {
 	// Store ctx before starting goroutines that read it.
+	sm.ctxMu.Lock()
 	sm.ctx = ctx
+	sm.ctxMu.Unlock()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -481,8 +489,12 @@ func (sm *StreamManager) handleListener(w http.ResponseWriter, r *http.Request) 
 	// Close the raw connection when the server shuts down or this listener
 	// is dropped by the broadcaster (slow consumer).
 	go func() {
+		sm.ctxMu.RLock()
+		ctx := sm.ctx
+		sm.ctxMu.RUnlock()
+
 		select {
-		case <-sm.ctx.Done():
+		case <-ctx.Done():
 		case <-l.done:
 		}
 		conn.Close()
@@ -513,9 +525,13 @@ func (sm *StreamManager) handleListener(w http.ResponseWriter, r *http.Request) 
 
 	// Stream audio. Write errors (client disconnect, slow-consumer close,
 	// shutdown) all cause a natural exit.
+	sm.ctxMu.RLock()
+	ctx := sm.ctx
+	sm.ctxMu.RUnlock()
+
 	for {
 		select {
-		case <-sm.ctx.Done():
+		case <-ctx.Done():
 			return
 		case <-l.done:
 			return
